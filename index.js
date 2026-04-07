@@ -34,9 +34,19 @@ try {
 setInterval(async () => {
   try {
     await axios.get(SELF_URL + "/ping");
-    console.log("💓 Ping - servidor acordado");
+    console.log("💓 Ping webhook - acordado");
   } catch(e) {}
-}, 14 * 60 * 1000); // a cada 14 minutos
+}, 14 * 60 * 1000);
+
+// Ping da Evolution API para mantê-la acordada
+setInterval(async () => {
+  try {
+    await axios.get(EVOLUTION_API_URL + "/", { headers: { apikey: EVOLUTION_API_KEY }, timeout: 10000 });
+    console.log("💓 Ping Evolution API - acordada");
+  } catch(e) {
+    console.log("⚠️ Evolution API dormindo, acordando...");
+  }
+}, 13 * 60 * 1000); // a cada 13 minutos
 
 // ============================================================
 // HELPERS
@@ -262,3 +272,5 @@ app.listen(PORT, () => {
   console.log(`📡 Evolution API: ${EVOLUTION_API_URL}`);
   console.log(`💓 Auto-ping ativo a cada 14 minutos`);
 });
+// Este código já foi adicionado no arquivo principal
+// Already included in main file - checking

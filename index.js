@@ -14,7 +14,7 @@ admin.initializeApp({credential:admin.credential.cert(serviceAccount)});
 const db = admin.firestore();
 console.log("Firebase OK");
 
-const EURL = "http://localhost:8080";
+const EURL = "http://145.241.171.170:8080";
 const EKEY = "minha-chave-secreta-2026";
 const EINST = "mensalidade";
 

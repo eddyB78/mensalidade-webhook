@@ -6,7 +6,10 @@ const admin = require("firebase-admin");
 const app = express();
 app.use(express.json());
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || fs.readFileSync("/home/ubuntu/firebase-key.json","utf8"));
+const serviceAccount = JSON.parse(
+  process.env.FIREBASE_SERVICE_ACCOUNT ||
+  fs.readFileSync("/home/ubuntu/firebase-key.json","utf8")
+);
 admin.initializeApp({credential:admin.credential.cert(serviceAccount)});
 const db = admin.firestore();
 console.log("Firebase OK");
@@ -150,7 +153,10 @@ app.post("/webhook", async (q,r) => {
     if (ev !== "messages.upsert" && ev !== "MESSAGES_UPSERT") return;
     const msgs = (b.data && b.data.messages) || b.messages || [];
     const msg = msgs[0];
-    if (!msg || msg.key.fromMe || !msg.message) return;
+    if (!msg) return;
+    if (msg.key.fromMe) return;
+    if (!msg.message) return;
+    if (msg.status === "DELIVERY_ACK" || msg.status === "READ" || msg.status === "PLAYED") return;
     const txt = (msg.message.conversation) ||
                 (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || "";
     if (!txt) return;
@@ -166,7 +172,7 @@ app.post("/webhook", async (q,r) => {
 
 process.on("uncaughtException", e => console.error("EXC", e.message));
 process.on("unhandledRejection", e => console.error("REJ", e));
-
 setInterval(() => {}, 30000);
 
-app.listen(3000, () => console.log("Porta 3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Porta " + PORT));

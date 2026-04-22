@@ -2,6 +2,7 @@ const fs = require("fs");
 const express = require("express");
 const axios = require("axios");
 const admin = require("firebase-admin");
+const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(express.json());
@@ -17,6 +18,16 @@ console.log("Firebase OK");
 const EURL = "http://localhost:8080";
 const EKEY = "minha-chave-secreta-2026";
 const EINST = "mensalidade";
+const GMAIL_USER = "Edgleison100@gmail.com";
+const GMAIL_PASS = "gjfsbooeixefpbee";
+
+const mailer = nodemailer.createTransport({
+  service: "gmail",
+  auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+});
+
+// Codigos temporarios: { tenantId_usuario: { codigo, expira } }
+const codigos = {};
 
 async function send(num, txt) {
   try {
@@ -24,7 +35,7 @@ async function send(num, txt) {
   } catch(e) { console.error("send err", e.message); }
 }
 
-function tel(t) { return String(t||"").replace(/\D/g,""); }
+function tel(t) { return String(t||"").replace(/[^0-9]/g, ""); }
 
 function mes() {
   const d = new Date();
@@ -35,6 +46,10 @@ function nomeMes(key) {
   const meses = ["Janeiro","Fevereiro","Marco","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
   const p = key.split("-");
   return meses[parseInt(p[1])-1] + " " + p[0];
+}
+
+function gerarCodigo() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 async function getUser(telefone) {
@@ -137,18 +152,10 @@ async function processarCmd(usuario, mensagem) {
   }
 
   if (cmd === "despago" && partes.length >= 2) {
-    const temCurso = partes.length >= 3;
-    const nomeBusca = temCurso ? partes.slice(1,-1).join(" ") : partes.slice(1).join(" ");
-    const aluno = await getAluno(tid, nomeBusca);
-    if (!aluno) return "\u274C Aluno *" + nomeBusca + "* n\u00e3o encontrado.";
+    const aluno = await getAluno(tid, partes.slice(1).join(" "));
+    if (!aluno) return "\u274C Aluno n\u00e3o encontrado.";
     const updates = {};
-    if (temCurso) {
-      const curso = await getCurso(tid, partes[partes.length-1]);
-      if (!curso) return "\u274C Curso n\u00e3o encontrado.";
-      updates["pagamentosCursos."+curso.id+"."+m] = false;
-    } else {
-      for (const cid of aluno.cursos || []) updates["pagamentosCursos."+cid+"."+m] = false;
-    }
+    for (const cid of aluno.cursos || []) updates["pagamentosCursos."+cid+"."+m] = false;
     await db.collection("tenants").doc(tid).collection("alunos").doc(aluno.id).update(updates);
     return "\u21A9\uFE0F Pagamento desmarcado para *" + aluno.nome + "*";
   }
@@ -178,24 +185,93 @@ async function processarCmd(usuario, mensagem) {
     if (!nome) return "\u274C Use: *novo [nome] [telefone]*";
     const nomeFormatado = nome.split(" ").map(function(w){return w.charAt(0).toUpperCase()+w.slice(1);}).join(" ");
     await db.collection("tenants").doc(tid).collection("alunos").add({
-      nome: nomeFormatado,
-      telefone: temTel ? ultimo : "",
-      email: "",
-      diaVencimento: 10,
-      dataInicio: new Date().toISOString().split("T")[0],
-      pagamentos: {},
-      cursos: [],
-      valoresCursos: {},
-      pagamentosCursos: {},
-      observacoes: "",
-      foto: "",
-      cursosGratuitos: []
+      nome: nomeFormatado, telefone: temTel ? ultimo : "", email: "",
+      diaVencimento: 10, dataInicio: new Date().toISOString().split("T")[0],
+      pagamentos: {}, cursos: [], valoresCursos: {}, pagamentosCursos: {},
+      observacoes: "", foto: "", cursosGratuitos: []
     });
-    return "\u2705 *" + nomeFormatado + "* adicionado!\n\u{1F4F1} " + (temTel ? ultimo : "Sem telefone") + "\n\nAdicione ao curso no sistema.";
+    return "\u2705 *" + nomeFormatado + "* adicionado!\n\u{1F4F1} " + (temTel ? ultimo : "Sem telefone");
   }
 
   return "\u2753 Comando *" + cmd + "* n\u00e3o reconhecido.\n\nDigite *ajuda* para ver os comandos.";
 }
+
+// ============ RECUPERACAO DE SENHA ============
+
+app.post("/recuperar-senha", async function(q,r) {
+  try {
+    const { usuario, tenantId, metodo } = q.body;
+    if (!usuario || !tenantId) return r.json({ok:false, erro:"Dados incompletos"});
+
+    // Buscar usuario no tenant
+    let userData = null;
+    let userId = null;
+    for (const col of ["usuarios","usuario"]) {
+      try {
+        const snap = await db.collection("tenants").doc(tenantId).collection(col).get();
+        const found = snap.docs.find(d => d.data().usuario === usuario);
+        if (found) { userData = found.data(); userId = found.id; break; }
+      } catch(e) {}
+    }
+    if (!userData) return r.json({ok:false, erro:"Usuário não encontrado"});
+
+    const codigo = gerarCodigo();
+    const chave = tenantId + "_" + usuario;
+    codigos[chave] = { codigo, expira: Date.now() + 10 * 60 * 1000 }; // 10 min
+
+    if (metodo === "whatsapp") {
+      const numTel = tel(userData.telefone || "");
+      if (!numTel) return r.json({ok:false, erro:"Telefone não cadastrado para este usuário"});
+      await send(numTel, "\u{1F512} *Mensalidade Bot*\n\nSeu código de recuperação de senha:\n\n*" + codigo + "*\n\nVálido por 10 minutos.\nNão compartilhe com ninguém.");
+      return r.json({ok:true, msg:"Código enviado via WhatsApp para " + numTel.replace(/\d(?=\d{4})/g,"*")});
+    } else if (metodo === "email") {
+      const email = userData.email || "";
+      if (!email) return r.json({ok:false, erro:"Email não cadastrado para este usuário"});
+      await mailer.sendMail({
+        from: '"Mensalidade Bot" <' + GMAIL_USER + ">",
+        to: email,
+        subject: "Código de recuperação de senha",
+        html: "<div style=\"font-family:sans-serif;max-width:400px;margin:auto;padding:20px\"><h2 style=\"color:#6c3fc5\">\u{1F512} Recuperação de Senha</h2><p>Seu código de recuperação:</p><div style=\"background:#f0f0f0;padding:20px;text-align:center;font-size:32px;font-weight:bold;letter-spacing:8px;border-radius:8px\">" + codigo + "</div><p style=\"color:#888;font-size:12px\">Válido por 10 minutos. Não compartilhe com ninguém.</p></div>"
+      });
+      return r.json({ok:true, msg:"Código enviado por email para " + email.replace(/(.{2})(.*)(@.*)/, "$1***$3")});
+    }
+    return r.json({ok:false, erro:"Método inválido"});
+  } catch(e) {
+    console.error("recuperar-senha err", e.message);
+    return r.json({ok:false, erro:"Erro interno"});
+  }
+});
+
+app.post("/verificar-codigo", async function(q,r) {
+  try {
+    const { usuario, tenantId, codigo, novaSenha } = q.body;
+    if (!usuario || !tenantId || !codigo || !novaSenha) return r.json({ok:false, erro:"Dados incompletos"});
+    const chave = tenantId + "_" + usuario;
+    const registro = codigos[chave];
+    if (!registro) return r.json({ok:false, erro:"Código não encontrado ou expirado"});
+    if (Date.now() > registro.expira) { delete codigos[chave]; return r.json({ok:false, erro:"Código expirado"}); }
+    if (registro.codigo !== codigo) return r.json({ok:false, erro:"Código incorreto"});
+    delete codigos[chave];
+
+    // Atualizar senha no Firebase
+    for (const col of ["usuarios","usuario"]) {
+      try {
+        const snap = await db.collection("tenants").doc(tenantId).collection(col).get();
+        const found = snap.docs.find(d => d.data().usuario === usuario);
+        if (found) {
+          await db.collection("tenants").doc(tenantId).collection(col).doc(found.id).update({senha: novaSenha});
+          return r.json({ok:true});
+        }
+      } catch(e) {}
+    }
+    return r.json({ok:false, erro:"Usuário não encontrado"});
+  } catch(e) {
+    console.error("verificar-codigo err", e.message);
+    return r.json({ok:false, erro:"Erro interno"});
+  }
+});
+
+// ============ FIM RECUPERACAO ============
 
 app.get("/", function(q,r) { r.json({status:"online"}); });
 app.get("/ping", function(q,r) { r.json({pong:true}); });

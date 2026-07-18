@@ -1,30 +1,47 @@
-const fs = require("fs");
+const crypto = require("crypto");
 const express = require("express");
 const axios = require("axios");
-const admin = require("firebase-admin");
+const {initializeApp, cert, applicationDefault} = require("firebase-admin/app");
+const {getFirestore, FieldValue} = require("firebase-admin/firestore");
+const {getAuth} = require("firebase-admin/auth");
 const nodemailer = require("nodemailer");
 
 const app = express();
-app.use(express.json());
+app.disable("x-powered-by");
+app.use(express.json({limit:"256kb"}));
 
-const serviceAccount = JSON.parse(
-  process.env.FIREBASE_SERVICE_ACCOUNT ||
-  fs.readFileSync("/home/ubuntu/firebase-key.json","utf8")
-);
-admin.initializeApp({credential:admin.credential.cert(serviceAccount)});
-const db = admin.firestore();
+const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (serviceAccountRaw) {
+  const serviceAccount = JSON.parse(serviceAccountRaw);
+  if (serviceAccount.private_key) serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+  initializeApp({credential:cert(serviceAccount)});
+} else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  initializeApp({credential:applicationDefault()});
+} else if (process.env.FIRESTORE_EMULATOR_HOST && process.env.GCLOUD_PROJECT) {
+  initializeApp({projectId:process.env.GCLOUD_PROJECT});
+} else {
+  throw new Error("Configure FIREBASE_SERVICE_ACCOUNT ou GOOGLE_APPLICATION_CREDENTIALS.");
+}
+const db = getFirestore();
 console.log("Firebase OK");
 
-const EURL = "http://localhost:8080";
-const EKEY = "minha-chave-secreta-2026";
-const EINST = "mensalidade";
-const GMAIL_USER = "Edgleison100@gmail.com";
-const GMAIL_PASS = "gjfsbooeixefpbee";
+function obrigatoria(nome) {
+  const valor = String(process.env[nome] || "").trim();
+  if (!valor) throw new Error("Variável obrigatória ausente: " + nome);
+  return valor;
+}
 
-const mailer = nodemailer.createTransport({
+const EURL = obrigatoria("EVOLUTION_API_URL").replace(/\/$/, "");
+const EKEY = obrigatoria("EVOLUTION_API_KEY");
+const EINST = obrigatoria("EVOLUTION_INSTANCE");
+const WEBHOOK_SECRET = obrigatoria("WEBHOOK_SECRET");
+const GMAIL_USER = String(process.env.GMAIL_USER || "").trim();
+const GMAIL_PASS = String(process.env.GMAIL_APP_PASSWORD || "").trim();
+
+const mailer = GMAIL_USER && GMAIL_PASS ? nodemailer.createTransport({
   service: "gmail",
   auth: { user: GMAIL_USER, pass: GMAIL_PASS }
-});
+}) : null;
 
 // Codigos temporarios: { tenantId_usuario: { codigo, expira } }
 const codigos = {};
@@ -49,7 +66,11 @@ function nomeMes(key) {
 }
 
 function gerarCodigo() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function hashCodigo(codigo) {
+  return crypto.createHash("sha256").update(String(codigo)).digest("hex");
 }
 
 async function getUser(telefone) {
@@ -203,6 +224,12 @@ app.post("/recuperar-senha", async function(q,r) {
     const { usuario, tenantId, metodo } = q.body;
     if (!usuario || !tenantId) return r.json({ok:false, erro:"Dados incompletos"});
 
+    const chave = tenantId + "_" + usuario;
+    const existente = codigos[chave];
+    if (existente && existente.proximoEnvio > Date.now()) {
+      return r.status(429).json({ok:false, erro:"Aguarde um minuto antes de solicitar outro código"});
+    }
+
     // Buscar usuario no tenant
     let userData = null;
     let userId = null;
@@ -216,8 +243,12 @@ app.post("/recuperar-senha", async function(q,r) {
     if (!userData) return r.json({ok:false, erro:"Usuário não encontrado"});
 
     const codigo = gerarCodigo();
-    const chave = tenantId + "_" + usuario;
-    codigos[chave] = { codigo, expira: Date.now() + 10 * 60 * 1000 }; // 10 min
+    codigos[chave] = {
+      codigoHash: hashCodigo(codigo),
+      expira: Date.now() + 10 * 60 * 1000,
+      proximoEnvio: Date.now() + 60 * 1000,
+      tentativas: 0
+    };
 
     if (metodo === "whatsapp") {
       const numTel = tel(userData.telefone || "");
@@ -225,6 +256,7 @@ app.post("/recuperar-senha", async function(q,r) {
       await send(numTel, "\u{1F512} *Mensalidade Bot*\n\nSeu código de recuperação de senha:\n\n*" + codigo + "*\n\nVálido por 10 minutos.\nNão compartilhe com ninguém.");
       return r.json({ok:true, msg:"Código enviado via WhatsApp para " + numTel.replace(/\d(?=\d{4})/g,"*")});
     } else if (metodo === "email") {
+      if (!mailer) return r.json({ok:false, erro:"Recuperação por e-mail não configurada"});
       const email = userData.email || "";
       if (!email) return r.json({ok:false, erro:"Email não cadastrado para este usuário"});
       await mailer.sendMail({
@@ -246,20 +278,29 @@ app.post("/verificar-codigo", async function(q,r) {
   try {
     const { usuario, tenantId, codigo, novaSenha } = q.body;
     if (!usuario || !tenantId || !codigo || !novaSenha) return r.json({ok:false, erro:"Dados incompletos"});
+    if (String(novaSenha).length < 6) return r.json({ok:false, erro:"A nova senha precisa ter pelo menos 6 caracteres"});
     const chave = tenantId + "_" + usuario;
     const registro = codigos[chave];
     if (!registro) return r.json({ok:false, erro:"Código não encontrado ou expirado"});
     if (Date.now() > registro.expira) { delete codigos[chave]; return r.json({ok:false, erro:"Código expirado"}); }
-    if (registro.codigo !== codigo) return r.json({ok:false, erro:"Código incorreto"});
+    registro.tentativas += 1;
+    if (registro.tentativas > 5) { delete codigos[chave]; return r.status(429).json({ok:false, erro:"Muitas tentativas. Solicite um novo código"}); }
+    if (registro.codigoHash !== hashCodigo(codigo)) return r.json({ok:false, erro:"Código incorreto"});
     delete codigos[chave];
 
-    // Atualizar senha no Firebase
+    // Atualizar a conta protegida no Firebase Authentication.
     for (const col of ["usuarios","usuario"]) {
       try {
         const snap = await db.collection("tenants").doc(tenantId).collection(col).get();
         const found = snap.docs.find(d => d.data().usuario === usuario);
         if (found) {
-          await db.collection("tenants").doc(tenantId).collection(col).doc(found.id).update({senha: novaSenha});
+          const dados = found.data();
+          if (!dados.authUid) return r.json({ok:false, erro:"Conta ainda não protegida pelo Firebase"});
+          await getAuth().updateUser(dados.authUid, {password:String(novaSenha)});
+          await db.collection("tenants").doc(tenantId).collection(col).doc(found.id).update({
+            senha: FieldValue.delete(),
+            senhaAtualizadaEm: new Date().toISOString()
+          });
           return r.json({ok:true});
         }
       } catch(e) {}
@@ -273,10 +314,12 @@ app.post("/verificar-codigo", async function(q,r) {
 
 // ============ FIM RECUPERACAO ============
 
-app.get("/", function(q,r) { r.json({status:"online"}); });
+app.get("/", function(q,r) { r.json({status:"online", service:"mensalidade-webhook"}); });
 app.get("/ping", function(q,r) { r.json({pong:true}); });
 
 app.post("/webhook", async function(q,r) {
+  const segredoRecebido = String(q.get("x-webhook-secret") || q.query.secret || "");
+  if (segredoRecebido !== WEBHOOK_SECRET) return r.sendStatus(401);
   r.sendStatus(200);
   try {
     const b = q.body;
@@ -300,9 +343,14 @@ app.post("/webhook", async function(q,r) {
   } catch(e) { console.error("ERR", e.message); }
 });
 
-process.on("uncaughtException", function(e) { console.error("EXC", e.message); });
-process.on("unhandledRejection", function(e) { console.error("REJ", e); });
-setInterval(function(){}, 30000);
+process.on("uncaughtException", function(e) {
+  console.error("EXC", e.message);
+  process.exit(1);
+});
+process.on("unhandledRejection", function(e) {
+  console.error("REJ", e);
+  process.exit(1);
+});
 
 var PORT = process.env.PORT || 3000;
 app.listen(PORT, function() { console.log("Porta " + PORT); });

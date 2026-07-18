@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mensalidade_postgres
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mensalidade_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.5
+    container_name: mensalidade_evolution
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+
+  evolution-manager:
+    image: evoapicloud/evolution-manager:latest
+    container_name: mensalidade_manager
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - sed -i 's/ must-revalidate//' /etc/nginx/conf.d/nginx.conf && exec nginx -g 'daemon off;'
+    depends_on:
+      - evolution-api
+    ports:
+      - "127.0.0.1:3001:80"
+
+  mensalidade-webhook:
+    profiles: ["bot"]
+    build:
+      context: .
+    container_name: mensalidade_webhook
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    depends_on:
+      - evolution-api
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./firebase-key.json:/run/secrets/firebase-key.json:ro
+
+volumes:
+  evolution_instances:
+  postgres_data:
+  redis_data:

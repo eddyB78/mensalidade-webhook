@@ -46,9 +46,13 @@ const mailer = GMAIL_USER && GMAIL_PASS ? nodemailer.createTransport({
 // Codigos temporarios: { tenantId_usuario: { codigo, expira } }
 const codigos = {};
 
+async function enviarMensagemWhatsApp(num, txt) {
+  await axios.post(EURL+"/message/sendText/"+EINST, {number:num,text:txt}, {headers:{apikey:EKEY}});
+}
+
 async function send(num, txt) {
   try {
-    await axios.post(EURL+"/message/sendText/"+EINST, {number:num,text:txt}, {headers:{apikey:EKEY}});
+    await enviarMensagemWhatsApp(num, txt);
   } catch(e) { console.error("send err", e.message); }
 }
 
@@ -317,6 +321,64 @@ app.post("/verificar-codigo", async function(q,r) {
 app.get("/", function(q,r) { r.json({status:"online", service:"mensalidade-webhook"}); });
 app.get("/ping", function(q,r) { r.json({pong:true}); });
 
+const enviosEmProcessamento = new Set();
+
+async function processarEnvioPendente(docSnap) {
+  if (enviosEmProcessamento.has(docSnap.ref.path)) return;
+  enviosEmProcessamento.add(docSnap.ref.path);
+  try {
+    const dados = await db.runTransaction(async transaction => {
+      const atual = await transaction.get(docSnap.ref);
+      if (!atual.exists || atual.data().status !== "pendente") return null;
+      transaction.update(docSnap.ref, {status:"enviando", iniciadoEm:new Date().toISOString()});
+      return atual.data();
+    });
+    if (!dados) return;
+
+    const numero = tel(dados.telefone);
+    const texto = String(dados.mensagem || "").trim();
+    if (numero.length < 8 || !texto || texto.length > 4096) throw new Error("Mensagem ou telefone inválido.");
+
+    await enviarMensagemWhatsApp(numero, texto);
+    await docSnap.ref.update({status:"enviado", enviadoEm:new Date().toISOString(), erro:FieldValue.delete()});
+    console.log("ENVIO OK " + docSnap.ref.path);
+  } catch (e) {
+    console.error("ENVIO ERR", e.message);
+    try {
+      await docSnap.ref.update({status:"erro", erro:String(e.message || "Erro ao enviar").slice(0,300), erroEm:new Date().toISOString()});
+    } catch (_) {}
+  } finally {
+    enviosEmProcessamento.delete(docSnap.ref.path);
+  }
+}
+
+const ouvintesFila = new Map();
+
+function observarFilaTenant(tenantDoc) {
+  if (ouvintesFila.has(tenantDoc.id)) return;
+  const cancelar = tenantDoc.ref.collection("filaMensagens").where("status", "==", "pendente").onSnapshot(snapshot => {
+    snapshot.docChanges().forEach(change => {
+      if (change.type === "added" || change.type === "modified") processarEnvioPendente(change.doc);
+    });
+  }, erro => console.error("FILA ERR " + tenantDoc.id, erro.message));
+  ouvintesFila.set(tenantDoc.id, cancelar);
+}
+
+function iniciarFilaMensagens() {
+  db.collection("tenants").onSnapshot(snapshot => {
+    snapshot.docChanges().forEach(change => {
+      if (change.type === "removed") {
+        const cancelar = ouvintesFila.get(change.doc.id);
+        if (cancelar) cancelar();
+        ouvintesFila.delete(change.doc.id);
+      } else {
+        observarFilaTenant(change.doc);
+      }
+    });
+  }, erro => console.error("TENANTS FILA ERR", erro.message));
+  console.log("Fila de mensagens ativa");
+}
+
 app.post("/webhook", async function(q,r) {
   const segredoRecebido = String(q.get("x-webhook-secret") || q.query.secret || "");
   if (segredoRecebido !== WEBHOOK_SECRET) return r.sendStatus(401);
@@ -333,7 +395,10 @@ app.post("/webhook", async function(q,r) {
     const txt = (msg.message.conversation) ||
                 (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || "";
     if (!txt) return;
-    const num = msg.key.remoteJid.replace("@s.whatsapp.net","");
+    const key = msg.key || {};
+    const jidTelefone = [key.remoteJidAlt, key.participantAlt, msg.senderPn, key.remoteJid]
+      .find(function(jid) { return /@s\.whatsapp\.net$/.test(String(jid || "")); }) || key.remoteJid || "";
+    const num = tel(String(jidTelefone).split("@")[0]);
     console.log("MSG " + num + ": " + txt);
     const usuario = await getUser(num);
     if (!usuario) { await send(num, "\u274C N\u00famero n\u00e3o autorizado.\n\nPe\u00e7a ao administrador para cadastrar seu n\u00famero no sistema."); return; }
@@ -353,4 +418,7 @@ process.on("unhandledRejection", function(e) {
 });
 
 var PORT = process.env.PORT || 3000;
-app.listen(PORT, function() { console.log("Porta " + PORT); });
+app.listen(PORT, function() {
+  console.log("Porta " + PORT);
+  iniciarFilaMensagens();
+});

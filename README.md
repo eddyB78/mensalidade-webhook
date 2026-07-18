@@ -60,6 +60,29 @@ docker build -t mensalidade-webhook .
 docker run --env-file .env -p 3000:3000 mensalidade-webhook
 ```
 
+## Execucao local completa
+
+O arquivo `docker-compose.local.yml` inicia Evolution API 2.3.5, PostgreSQL,
+Redis e o painel local. A versao foi fixada para evitar a exigencia de licenca
+introduzida na Evolution API 2.4.
+
+1. Salve a chave de conta de servico do Firebase como `firebase-key.json`.
+2. Inicie a Evolution API e o painel:
+
+```bash
+docker compose -f docker-compose.local.yml up -d postgres redis evolution-api evolution-manager
+```
+
+3. Abra `http://localhost:3001`, conecte em `http://localhost:8080` e crie a
+   instancia `mensalidade`.
+4. Inicie o bot depois que a chave Firebase existir:
+
+```bash
+docker compose -f docker-compose.local.yml --profile bot up -d
+```
+
+O computador precisa permanecer ligado e o Docker Desktop precisa estar aberto.
+
 ## Segurança
 
 - Troque imediatamente qualquer chave que já tenha aparecido no histórico do GitHub.

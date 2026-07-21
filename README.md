@@ -15,6 +15,21 @@ Webhook seguro para integrar o aplicativo Mensalidade com a Evolution API e o Fi
 | `despago João` | Desmarca o pagamento atual |
 | `novo Maria +5511999999` | Adiciona um aluno |
 
+## Linguagem natural
+
+O bot também entende frases comuns em português e pequenos erros de digitação. Exemplos:
+
+| Mensagem recebida | Interpretação |
+|---|---|
+| `Eddy pago esse meis` | `pago eddy` |
+| `Eddy pagou este mês` | `pago eddy` |
+| `Marque Eddy como pago` | `pago eddy` |
+| `Como está a Maria?` | `status maria` |
+| `Quem está devendo?` | `alunos` |
+| `Quais são os cursos?` | `cursos` |
+
+Os comandos originais continuam funcionando. A interpretação ocorre somente depois que o número do usuário e o tenant são validados.
+
 ## Configuração
 
 Todas as credenciais devem ser configuradas como variáveis secretas da hospedagem. Nunca coloque chaves diretamente no código.

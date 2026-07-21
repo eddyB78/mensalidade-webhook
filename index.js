@@ -5,6 +5,7 @@ const {initializeApp, cert, applicationDefault} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {getAuth} = require("firebase-admin/auth");
 const nodemailer = require("nodemailer");
+const {interpretarMensagemNatural, normalizarTexto} = require("./interpretador");
 
 const app = express();
 app.disable("x-powered-by");
@@ -95,18 +96,18 @@ async function getUser(telefone) {
 
 async function getAluno(tenantId, nome) {
   const snap = await db.collection("tenants").doc(tenantId).collection("alunos").get();
-  const termo = nome.toLowerCase().trim();
+  const termo = normalizarTexto(nome);
   const alunos = snap.docs.map(d => ({id:d.id,...d.data()}));
-  return alunos.find(a => a.nome && a.nome.toLowerCase() === termo) ||
-         alunos.find(a => a.nome && a.nome.toLowerCase().includes(termo));
+  return alunos.find(a => a.nome && normalizarTexto(a.nome) === termo) ||
+         alunos.find(a => a.nome && normalizarTexto(a.nome).includes(termo));
 }
 
 async function getCurso(tenantId, nome) {
   const snap = await db.collection("tenants").doc(tenantId).collection("cursos").get();
-  const termo = nome.toLowerCase().trim();
+  const termo = normalizarTexto(nome);
   const cursos = snap.docs.map(d => ({id:d.id,...d.data()}));
-  return cursos.find(c => c.nome && c.nome.toLowerCase() === termo) ||
-         cursos.find(c => c.nome && c.nome.toLowerCase().includes(termo));
+  return cursos.find(c => c.nome && normalizarTexto(c.nome) === termo) ||
+         cursos.find(c => c.nome && normalizarTexto(c.nome).includes(termo));
 }
 
 async function processarCmd(usuario, mensagem) {
@@ -402,7 +403,11 @@ app.post("/webhook", async function(q,r) {
     console.log("MSG " + num + ": " + txt);
     const usuario = await getUser(num);
     if (!usuario) { await send(num, "\u274C N\u00famero n\u00e3o autorizado.\n\nPe\u00e7a ao administrador para cadastrar seu n\u00famero no sistema."); return; }
-    const resp = await processarCmd(usuario, txt);
+    const comando = interpretarMensagemNatural(txt);
+    if (comando !== txt.trim()) {
+      console.log("INTENCAO " + num + ": " + comando);
+    }
+    const resp = await processarCmd(usuario, comando);
     await send(num, resp);
     console.log("OK " + usuario.nome);
   } catch(e) { console.error("ERR", e.message); }

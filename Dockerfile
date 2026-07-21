@@ -6,7 +6,7 @@ RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
-COPY index.js ./
+COPY index.js interpretador.js ./
 
 ENV NODE_ENV=production
 EXPOSE 3000
